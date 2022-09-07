@@ -2,14 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+
+	// "reflect"
+	"strings"
+
+	// "reflect"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/michelooliveira/vinyl-store/database"
 	"github.com/michelooliveira/vinyl-store/utils"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	// "encoding/json"
@@ -19,6 +27,8 @@ import (
 var collection *mongo.Collection
 
 var ctx = context.TODO()
+
+var validate *validator.Validate
 
 // album represents data about a record album.
 type album struct {
@@ -38,11 +48,34 @@ type ErrorMsg struct {
 	Message string `json:"message"`
 }
 
-func getAlbums(c *gin.Context) {
-	database.Connect()
+var fieldsAndMessages map[string]string
 
+func getFilters(queryString url.Values) bson.M {
+	var filters bson.M
+	filters = bson.M{}
+	if len(queryString["price"]) > 0 {
+		filters["price"] = bson.M{
+			"$regex": primitive.Regex{Pattern: fmt.Sprintf(".*%s.*", queryString["price"][0]), Options: "i"},
+		}
+	}
+	if len(queryString["artist"]) > 0 {
+		filters["artist"] = bson.M{
+			"$regex": primitive.Regex{Pattern: fmt.Sprintf(".*%s.*", queryString["artist"][0]), Options: "i"},
+		}
+	}
+	if len(queryString["title"]) > 0 {
+		filters["title"] = bson.M{
+			"$regex": primitive.Regex{Pattern: fmt.Sprintf(".*%s.*", queryString["title"][0]), Options: "i"},
+		}
+	}
+	return filters
+}
+
+func getAlbums(c *gin.Context) {
+	queryString := c.Request.URL.Query()
 	var results []bson.M
-	cursor, err := collection.Find(ctx, bson.D{})
+	filter := getFilters(queryString)
+	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
 		panic(err)
 	}
@@ -55,15 +88,25 @@ func postAlbums(c *gin.Context) {
 	var newAlbum newAlbum
 	if err := c.ShouldBindJSON(&newAlbum); err != nil {
 		var ve validator.ValidationErrors
+		var jsonErr *json.UnmarshalTypeError
 		if errors.As(err, &ve) {
 			out := make([]ErrorMsg, len(ve))
 			for i, fe := range ve {
 				out[i] = ErrorMsg{fe.Field(), utils.GetErrorMsg(fe)}
 			}
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"errors": out})
-
+			return
 		}
-		return
+		if errors.As(err, &jsonErr) {
+			out := make([]ErrorMsg, 1)
+			messageForThisField := fieldsAndMessages[jsonErr.Field]
+			out[0] = ErrorMsg{
+				Field:   strings.ToLower(jsonErr.Field),
+				Message: messageForThisField,
+			}
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"errors": out})
+			return
+		}
 	}
 	res, err := collection.InsertOne(
 		context.Background(),
@@ -81,7 +124,6 @@ func getAlbumByID(c *gin.Context) {
 	id := utils.ConvertStringToObjectId(c.Param("id"))
 	var result bson.M
 	err := collection.FindOne(ctx, bson.D{{"_id", id}}).Decode(&result)
-	fmt.Print(err)
 	if err == mongo.ErrNoDocuments {
 		c.IndentedJSON(http.StatusNotFound, gin.H{"message": "album not found"})
 		return
@@ -92,10 +134,21 @@ func getAlbumByID(c *gin.Context) {
 func updateAlbum(c *gin.Context) {
 	id := utils.ConvertStringToObjectId(c.Param("id"))
 	var fieldsToUpdate album
-	if err := c.BindJSON(&fieldsToUpdate); err != nil {
-		panic(err)
+	if err := c.ShouldBindJSON(&fieldsToUpdate); err != nil {
+		var jsonErr *json.UnmarshalTypeError
+		if errors.As(err, &jsonErr) {
+			out := make([]ErrorMsg, 1)
+			messageForThisField := fieldsAndMessages[jsonErr.Field]
+			out[0] = ErrorMsg{
+				Field:   strings.ToLower(jsonErr.Field),
+				Message: messageForThisField,
+			}
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"errors": out})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"errors": "Erro inesperado."})
+		return
 	}
-	// fmt.Print("Fields", fieldsToUpdate)
 	update := bson.D{{"$set", bson.D{
 		{"artist", fieldsToUpdate.Artist},
 		{"title", fieldsToUpdate.Title},
@@ -103,7 +156,6 @@ func updateAlbum(c *gin.Context) {
 	}}}
 	// filter := bson.D{{"_id", id}}
 	res, err := collection.UpdateByID(ctx, id, update)
-	fmt.Print(res)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.IndentedJSON(http.StatusNotFound, gin.H{"message": "album not found"})
@@ -130,6 +182,12 @@ func deleteAlbum(c *gin.Context) {
 func init() {
 	database.Connect()
 	collection = database.Collection
+	fieldsAndMessages = map[string]string{
+		"title":  "O título deve ser do tipo string",
+		"artist": "O artista deve ser do tipo string",
+		"price":  "O preço deve ser do tipo float64",
+	}
+	validate = validator.New()
 }
 
 func main() {
