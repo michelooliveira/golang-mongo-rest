@@ -12,6 +12,8 @@ import (
 	// "reflect"
 	"net/url"
 
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/michelooliveira/vinyl-store/database"
@@ -19,6 +21,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	// "encoding/json"
 	"net/http"
@@ -51,8 +54,7 @@ type ErrorMsg struct {
 var fieldsAndMessages map[string]string
 
 func getFilters(queryString url.Values) bson.M {
-	var filters bson.M
-	filters = bson.M{}
+	var filters = bson.M{}
 	if len(queryString["price"]) > 0 {
 		filters["price"] = bson.M{
 			"$regex": primitive.Regex{Pattern: fmt.Sprintf(".*%s.*", queryString["price"][0]), Options: "i"},
@@ -75,12 +77,44 @@ func getAlbums(c *gin.Context) {
 	queryString := c.Request.URL.Query()
 	var results []bson.M
 	filter := getFilters(queryString)
-	cursor, err := collection.Find(ctx, filter)
+	var page int64 = 1
+	var perPage int64 = 10
+	pageFromQuery := queryString["page"]
+	perPageFromQuery := queryString["perPage"]
+	if len(pageFromQuery) > 0 {
+		convertedPageFromString, err := strconv.Atoi(pageFromQuery[0])
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"message": "O parâmetro 'page' deve ser um número.",
+			})
+		}
+		page = int64(convertedPageFromString)
+	}
+	if len(perPageFromQuery) > 0 {
+		convertedPerPageFromString, err := strconv.Atoi(perPageFromQuery[0])
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"message": "O parâmetro 'page' deve ser um número.",
+			})
+		}
+		perPage = int64(convertedPerPageFromString)
+	}
+
+	findOptions := options.Find()
+	findOptions.SetLimit(int64(perPage)) // SetLimit só aceita int64
+	findOptions.SetSkip(int64(page-1) * int64(perPage))
+	total, _ := collection.CountDocuments(ctx, filter)
+	cursor, err := collection.Find(ctx, filter, findOptions)
 	if err != nil {
 		panic(err)
 	}
 	cursor.All(ctx, &results)
-	c.IndentedJSON(http.StatusOK, results)
+	c.IndentedJSON(http.StatusOK, gin.H{
+		"data":    results,
+		"total":   total,
+		"page":    page,
+		"perPage": perPage,
+	})
 
 }
 
