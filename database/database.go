@@ -12,9 +12,12 @@ import (
 )
 
 var Collection *mongo.Collection
+var AuthCollection *mongo.Collection
+
+var Client *mongo.Client
 
 func Connect() {
-	if err := godotenv.Load(".env"); err != nil {
+	if err := godotenv.Load("app.env"); err != nil {
 		log.Println("No .env file found")
 	}
 	uri := os.Getenv("MONGODB_URI")
@@ -26,4 +29,5 @@ func Connect() {
 		panic(err)
 	}
 	Collection = client.Database("vinyl_store").Collection("albums")
+	AuthCollection = client.Database("vinyl_store").Collection("users")
 }

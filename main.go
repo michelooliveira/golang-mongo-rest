@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 
 	// "reflect"
 	"strings"
@@ -14,9 +15,15 @@ import (
 
 	"strconv"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/go-redis/redis"
+	"github.com/michelooliveira/vinyl-store/config"
+	"github.com/michelooliveira/vinyl-store/controllers"
 	"github.com/michelooliveira/vinyl-store/database"
+	"github.com/michelooliveira/vinyl-store/routes"
+	"github.com/michelooliveira/vinyl-store/services"
 	"github.com/michelooliveira/vinyl-store/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -27,18 +34,31 @@ import (
 	"net/http"
 )
 
-var collection *mongo.Collection
+var (
+	server *gin.Engine
+	// ctx         context.Context
+	client              *mongo.Client
+	mongoclient         *mongo.Client
+	redisclient         *redis.Client
+	userService         services.UserService
+	UserController      controllers.UserController
+	UserRouteController routes.UserRouteController
+	authCollection      *mongo.Collection
+	authService         services.AuthService
+	AuthController      controllers.AuthController
+	AuthRouteController routes.AuthRouteController
+	collection          *mongo.Collection
+	validate            *validator.Validate
+)
 
 var ctx = context.TODO()
 
-var validate *validator.Validate
-
 // album represents data about a record album.
 type album struct {
-	ID     string  `json:"id" bson:"_id, omitempty"`
-	Title  string  `json:"title" bson:"title, omitempty"`
-	Artist string  `json:"artist" bson:"artist, omitempty"`
-	Price  float64 `json:"price" bson:"price, omitempty"`
+	ID     primitive.ObjectID `json:"id" bson:"_id, omitempty"`
+	Title  string             `json:"title" bson:"title, omitempty"`
+	Artist string             `json:"artist" bson:"artist, omitempty"`
+	Price  float64            `json:"price" bson:"price, omitempty"`
 }
 type newAlbum struct {
 	Title  string  `json:"title" bson:"title, omitempty" binding:"required"`
@@ -214,22 +234,73 @@ func deleteAlbum(c *gin.Context) {
 }
 
 func init() {
+	config, _ := config.LoadConfig(".")
 	database.Connect()
 	collection = database.Collection
+	client = database.Client
 	fieldsAndMessages = map[string]string{
 		"title":  "O título deve ser do tipo string",
 		"artist": "O artista deve ser do tipo string",
 		"price":  "O preço deve ser do tipo float64",
 	}
+
 	validate = validator.New()
+	redisclient = redis.NewClient(&redis.Options{
+		Addr: config.RedisUri,
+	})
+	if _, err := redisclient.Ping().Result(); err != nil {
+		panic(err)
+	}
+	redisclient.Set("test", "Welcome to Golang with Redis and MongoDB", 0).Err()
+
+	fmt.Println("Redis client connected successfully...")
+
+	// Collections
+	authCollection = database.AuthCollection
+	// authCollection = client.Database("vinyl_store").Collection("users")
+	userService = services.NewUserServiceImpl(authCollection, ctx)
+	authService = services.NewAuthService(authCollection, ctx)
+	AuthController = controllers.NewAuthController(authService, userService)
+	AuthRouteController = routes.NewAuthRouteController(AuthController)
+
+	UserController = controllers.NewUserController(userService)
+	UserRouteController = routes.NewRouteUserController(UserController)
+
 }
 
 func main() {
-	router := gin.Default()
+	config, err := config.LoadConfig(".")
+
+	if err != nil {
+		log.Fatal("Could not load config", err)
+	}
+	value, err := redisclient.Get("test").Result()
+
+	if err == redis.Nil {
+		fmt.Println("key: test does not exist")
+	} else if err != nil {
+		panic(err)
+	}
+
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = []string{"http://localhost:8000", "http://localhost:3000"}
+	corsConfig.AllowCredentials = true
+
+	server := gin.Default()
+	server.Use(cors.New(corsConfig))
+
+	router := server.Group("/api")
+	router.GET("/healthchecker", func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, gin.H{"status": "success", "message": value})
+	})
+
+	AuthRouteController.AuthRoute(router, userService)
+	UserRouteController.UserRoute(router, userService)
+
 	router.GET("/albums", getAlbums)
 	router.POST("/albums", postAlbums)
 	router.GET("/albums/:id", getAlbumByID)
 	router.PATCH("/albums/:id", updateAlbum)
 	router.DELETE("/albums/:id", deleteAlbum)
-	router.Run(":8080")
+	log.Fatal(server.Run(":" + config.Port))
 }
